@@ -8,4 +8,4 @@ Reusable music timing capabilities, separate from the ear-training app:
 
 The host owns lessons, settings, pass thresholds and persistence. The browser controller finalizes without animation frames; audio scheduling belongs to its backend. No import starts audio, listeners or tasks.
 
-Run `pnpm install`, `pnpm build`, `pnpm typecheck`, `pnpm test`. Build before locally linking into a consumer. Changesets record releasable package work; the initial packages are unpublished. Package READMEs document the public contracts. `pnpm smoke` checks packed Node and React consumers; `examples/vanilla.ts` demonstrates the neutral browser port.
+Run `pnpm install`, `pnpm build`, `pnpm typecheck`, `pnpm test`. Build before locally linking into a consumer. Changesets record releasable package work; the packages are published to npm. Package READMEs document the public contracts. `pnpm smoke` checks packed Node and React consumers; `examples/vanilla.ts` demonstrates the neutral browser port.
