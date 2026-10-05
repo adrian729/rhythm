@@ -1,6 +1,6 @@
 {
   "name": "@polyhymnia/rhythm-react",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "React adapters and configurable visuals for rhythm practice.",
   "sideEffects": false,

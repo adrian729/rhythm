@@ -1,6 +1,6 @@
 import { analyzeTiming, captureBounds, type CapturedTap, type RhythmTarget, type TimedAttemptPlan, type TimingAnalysis } from '../index.js';
 import { normalizeInputTimestamp } from './input.js';
-import { browserRuntime, type AttemptRuntime, type ClockSnapshot, type RhythmPlaybackHandle, type RhythmPlaybackPort } from './ports.js';
+import { browserRuntime, type AttemptRuntime, type ClockSnapshot, type RhythmPlaybackHandle, type RhythmPlaybackPort, type ExternalInputSource, type ExternalInputHandle } from './ports.js';
 
 export type AttemptPhase = 'ready' | 'preparing' | 'countIn' | 'listen' | 'respond' | 'finalizing' | 'completed' | 'interrupted' | 'disposed';
 export interface AttemptSnapshot<M = unknown> {
@@ -13,6 +13,7 @@ export interface AttemptSnapshot<M = unknown> {
 }
 export interface AttemptOptions<M> {
   offsetMs: number;
+  inputSources?: readonly ExternalInputSource[];
   /** Padding for simultaneous inputs with different fixed offsets. Default is offsetMs only. */
   offsetRangeMs?: readonly [number, number];
   creditRadiusSeconds: number | ((target: RhythmTarget<M>) => number);
@@ -42,10 +43,13 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
   let closingPerformanceMs = Infinity;
   let graceMs = 250;
   let jumpMs = 75;
+  let sourceHandles: { source: ExternalInputSource; handle: ExternalInputHandle }[] = [];
+  let sourcesDrained = true, drainStarted = false;
 
   const publish = (next: AttemptSnapshot<M>) => { snapshot = next; for (const listener of listeners) listener(); };
   const cleanup = () => {
     abort?.abort(); abort = undefined;
+    for (const item of sourceHandles.splice(0)) item.handle.cancel();
     for (const off of cleanups.splice(0)) off();
     handle?.stop(); handle = undefined;
   };
@@ -85,6 +89,27 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
     return next;
   };
 
+  const captureTap = (timestampMs: number, inputOffsetMs: number, sourceId?: string, maximumAgeMs = graceMs) => {
+      if (!active() || !bounds || !options) return;
+      try {
+        const timestamp = normalizeInputTimestamp(timestampMs, runtime);
+        const offset = inputOffsetMs ?? options.offsetMs;
+        const [minimum, maximum] = options.offsetRangeMs ?? [options.offsetMs, options.offsetMs];
+        if (!Number.isFinite(offset) || offset < minimum || offset > maximum) throw new RangeError('Input adjustment is outside the prepared range.');
+        const pair = readClock();
+        if (!pair) return;
+        const corrected = pair.playbackTimeSeconds + (timestamp - pair.performanceTimeMs) / 1000 - offset / 1000;
+        if (corrected < bounds.correctedStart || corrected >= bounds.correctedEnd) return;
+        if (runtime.nowMs() - timestamp > maximumAgeMs) {
+          interrupt('Input arrived too late to grade reliably. Restart this attempt.'); return;
+        }
+        if (taps.length >= 10000) { interrupt('Input event limit exceeded.'); return; }
+        taps.push({ atSeconds: corrected, sequence: taps.length, ...(sourceId ? { sourceId } : {}) });
+      } catch {
+        interrupt('Input timing is unavailable. Restart this attempt.');
+      }
+  };
+
   const controller = {
     getSnapshot: () => snapshot,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -99,26 +124,20 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
       controller.recordAdjustedTap(timestampMs, options?.offsetMs ?? 0);
     },
     recordAdjustedTap(timestampMs: number, inputOffsetMs: number) {
-      if (!active() || !bounds || !options) return;
-      try {
-        const timestamp = normalizeInputTimestamp(timestampMs, runtime);
-        const offset = inputOffsetMs ?? options.offsetMs;
-        const [minimum, maximum] = options.offsetRangeMs ?? [options.offsetMs, options.offsetMs];
-        if (!Number.isFinite(offset) || offset < minimum || offset > maximum) throw new RangeError('Input adjustment is outside the prepared range.');
-        const pair = readClock();
-        if (!pair) return;
-        const corrected = pair.playbackTimeSeconds + (timestamp - pair.performanceTimeMs) / 1000 - offset / 1000;
-        if (corrected < bounds.correctedStart || corrected >= bounds.correctedEnd) return;
-        if (runtime.nowMs() - timestamp > graceMs) {
-          interrupt('Input arrived too late to grade reliably. Restart this attempt.'); return;
-        }
-        taps.push({ atSeconds: corrected, sequence: taps.length });
-      } catch {
-        interrupt('Input timing is unavailable. Restart this attempt.');
-      }
+      captureTap(timestampMs, inputOffsetMs);
     },
     async start(nextPlan: TimedAttemptPlan<S, M>, nextOptions: AttemptOptions<M>): Promise<void> {
       if (snapshot.phase === 'disposed') throw new Error('Controller disposed.');
+      const sources = (nextOptions.inputSources ?? []).map(source => ({
+        id: source.id, offsetMs: source.offsetMs, maximumDeliveryAgeMs: source.maximumDeliveryAgeMs,
+        drainTimeoutMs: source.drainTimeoutMs, prepare: source.prepare.bind(source), start: source.start.bind(source),
+      }));
+      if (new Set(sources.map(source => source.id)).size !== sources.length || sources.some(source =>
+        !source.id || !Number.isFinite(source.offsetMs) || !Number.isFinite(source.maximumDeliveryAgeMs) ||
+        source.maximumDeliveryAgeMs <= 0 || source.maximumDeliveryAgeMs > 10000 ||
+        !Number.isFinite(source.drainTimeoutMs) || source.drainTimeoutMs <= 0 || source.drainTimeoutMs > 10000)) {
+        throw new RangeError('Invalid external input policy.');
+      }
       const lastAudioEnd = port.validateStimulus(nextPlan.stimulus).lastAudioEndSeconds;
       const nextGrace = nextOptions.deliveryGraceMs ?? 250;
       const heartbeat = nextOptions.heartbeatMs ?? 50;
@@ -131,6 +150,7 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
       if (![minimumOffset, maximumOffset, nextOptions.offsetMs].every(Number.isFinite) || minimumOffset > nextOptions.offsetMs || maximumOffset < nextOptions.offsetMs) {
         throw new RangeError('Invalid input adjustment range.');
       }
+      if (sources.some(source => source.offsetMs < minimumOffset || source.offsetMs > maximumOffset)) throw new RangeError('External input adjustment is outside the prepared range.');
       const firstBounds = captureBounds(nextPlan, minimumOffset, nextGrace / 1000, lastAudioEnd);
       const lastBounds = captureBounds(nextPlan, maximumOffset, nextGrace / 1000, lastAudioEnd);
       const nextBounds = { ...firstBounds, rawEnd: lastBounds.rawEnd, runtimeDuration: Math.max(firstBounds.runtimeDuration, lastBounds.runtimeDuration) };
@@ -141,7 +161,7 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
       const token = generation;
       options = nextOptions; bounds = nextBounds;
       graceMs = nextGrace; jumpMs = nextJump; taps = []; clock = undefined; clockSource = undefined; ended = false;
-      closingPerformanceMs = Infinity;
+      closingPerformanceMs = Infinity; sourcesDrained = sources.length === 0; drainStarted = false;
       abort = new AbortController();
       const signal = abort.signal;
       publish({ phase: 'preparing', playbackTimeSeconds: 0, tapCount: 0 });
@@ -157,7 +177,7 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
       };
       watchLifecycle();
       try {
-        await withAbort(port.prepare(signal), signal);
+        await withAbort(Promise.all([port.prepare(signal), ...sources.map(source => source.prepare(signal))]), signal);
         if (token !== generation) return;
         handle = port.playSilence({ durationSeconds: timeout / 1000 + 1, leadSeconds: 0 });
         const stopWarmupWatch = handle.onInterrupted(interrupt);
@@ -193,6 +213,25 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
         if (initial.playbackTimeSeconds + (runtime.nowMs() - initial.performanceTimeMs) / 1000 >= nextBounds.rawStart) {
           interrupt('Count-in is too short for input setup. Choose a longer count-in.'); return;
         }
+        for (const source of sources) {
+          const toPerformance = (at: number) => initial.performanceTimeMs + (at - initial.playbackTimeSeconds) * 1000;
+          const seen = new Set<string>();
+          const inputHandle = source.start({ generation: token,
+            eligibilityStartPerformanceMs: toPerformance(nextBounds.correctedStart + source.offsetMs / 1000),
+            eligibilityEndPerformanceMs: toPerformance(nextBounds.correctedEnd + source.offsetMs / 1000),
+            emit(event) {
+              if (token !== generation || event.generation !== token) return;
+              if (!event.eventId || !Number.isFinite(event.performanceTimeMs)) { interrupt('External input timing is unavailable.'); return; }
+              if (seen.has(event.eventId)) return;
+              if (seen.size >= 10000) { interrupt('External input event limit exceeded.'); return; }
+              seen.add(event.eventId);
+              captureTap(event.performanceTimeMs, source.offsetMs, source.id, source.maximumDeliveryAgeMs);
+            },
+            interrupt(reason) { if (token === generation) interrupt(reason); },
+          });
+          if (token !== generation) { inputHandle.cancel(); return; }
+          sourceHandles.push({ source, handle: inputHandle });
+        }
         budgetOff();
         lastHeartbeat = runtime.nowMs();
         handle.finished.then(result => {
@@ -215,7 +254,17 @@ export function createTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>,
           // Check the still-open heartbeat gap before updating it; callback order cannot hide a stall.
           lastHeartbeat = now;
           const phase = nextPlan.phases.find(p => at >= p.startSeconds && at < p.endSeconds)?.kind;
-          if (ended && at >= nextBounds.runtimeDuration && now >= closingPerformanceMs + graceMs) {
+          if (!drainStarted && at >= nextBounds.rawEnd) {
+            drainStarted = true;
+            void Promise.all(sourceHandles.map(({ source, handle: input }) => new Promise<void>((resolve, reject) => {
+              const off = runtime.scheduleTask(() => reject(new Error(`Input source ${source.id} did not finish in time.`)), source.drainTimeoutMs);
+              cleanups.push(off);
+              Promise.resolve().then(() => input.drain()).then(() => { off(); resolve(); }, error => { off(); reject(error); });
+            }))).then(() => { if (token === generation) sourcesDrained = true; }, error => {
+              if (token === generation) interrupt(error instanceof Error ? error.message : 'External input drain failed.');
+            });
+          }
+          if (sourcesDrained && ended && at >= nextBounds.runtimeDuration && now >= closingPerformanceMs + graceMs) {
             const result = analyzeTiming(nextPlan, taps, nextOptions.creditRadiusSeconds);
             cleanup();
             publish({ phase: 'completed', playbackTimeSeconds: at, tapCount: taps.length, clockSource, result });

@@ -13,7 +13,7 @@ export interface TimedAttemptPlan<Stimulus, Metadata = unknown> {
   responseWindow: { startSeconds: number; endSeconds: number };
 }
 
-export interface CapturedTap { atSeconds: number; sequence: number }
+export interface CapturedTap { atSeconds: number; sequence: number; sourceId?: string }
 export interface TargetTiming<Metadata = unknown> {
   target: RhythmTarget<Metadata>;
   tap?: CapturedTap;

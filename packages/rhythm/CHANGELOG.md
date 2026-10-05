@@ -1,5 +1,11 @@
 # @polyhymnia/rhythm
 
+## 0.3.0
+
+### Minor Changes
+
+- Add optional neutral external input sources with per-source delivery allowance, provenance, eligibility boundaries and bounded final drain. Native input defaults are unchanged.
+
 ## 0.2.0
 
 ### Minor Changes
