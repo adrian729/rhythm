@@ -1,5 +1,11 @@
 # @polyhymnia/rhythm-react
 
+## 0.3.0
+
+### Minor Changes
+
+- Add `useTimedAttemptController` and `useAttemptState(controller, select)`, so a screen can follow only the attempt's phase or result instead of re-rendering on every playback-clock heartbeat. `useTimedAttempt` is built from them and behaves as before.
+
 ## 0.2.1
 
 ### Patch Changes

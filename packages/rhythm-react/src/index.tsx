@@ -1,14 +1,32 @@
 import { useEffect, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
 import type { PulsePlan, TimingAnalysis } from '@polyhymnia/rhythm';
-import { createTimedAttempt, type AttemptRuntime, type RhythmPlaybackPort } from '@polyhymnia/rhythm/browser';
+import { createTimedAttempt, type AttemptRuntime, type AttemptSnapshot, type RhythmPlaybackPort, type TimedAttemptController } from '@polyhymnia/rhythm/browser';
 
 /** Headless adapter. The host owns controls, input binding, scoring policy and storage. */
 export function useTimedAttempt<S, M = unknown>(port: RhythmPlaybackPort<S>, runtime?: AttemptRuntime) {
+  const controller = useTimedAttemptController<S, M>(port, runtime);
+  const snapshot = useAttemptState(controller, whole);
+  return { controller, snapshot };
+}
+
+const whole = <T,>(snapshot: T) => snapshot;
+
+/** The attempt controller for a port, without subscribing to it; follow its state with `useAttemptState`. */
+export function useTimedAttemptController<S, M = unknown>(port: RhythmPlaybackPort<S>, runtime?: AttemptRuntime) {
   const controller = useMemo(() => createTimedAttempt<S, M>(port, runtime), [port, runtime]);
-  const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   // Cancel rather than dispose: React's development effect replay reuses the controller.
   useEffect(() => () => controller.cancel('Practice closed.'), [controller]);
-  return { controller, snapshot };
+  return controller;
+}
+
+/**
+ * One value from the attempt's snapshot, re-rendering only when it changes (`Object.is`). The
+ * snapshot advances with the playback clock many times a second; a screen that follows only the
+ * phase or the result selects those, and leaves the clock to the few components that show it.
+ */
+export function useAttemptState<S, M, T>(controller: TimedAttemptController<S, M>, select: (snapshot: AttemptSnapshot<M>) => T): T {
+  const read = () => select(controller.getSnapshot());
+  return useSyncExternalStore(controller.subscribe, read, read);
 }
 
 export interface BeatGuideProps {

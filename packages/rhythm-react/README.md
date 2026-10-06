@@ -4,6 +4,9 @@ Thin React peer integration over the rhythm browser controller. React 18–19; b
 
 ```tsx
 const { controller, snapshot } = useTimedAttempt(myAudioPort);
+// Or follow only what a component shows: the snapshot advances with the playback clock.
+// const controller = useTimedAttemptController(myAudioPort);
+// const phase = useAttemptState(controller, snapshot => snapshot.phase);
 // Explicit gesture: controller.start(plan, { offsetMs: 0, creditRadiusSeconds: 0.08 });
 <BeatGuide plan={plan} phase="respond"
   playbackTimeSeconds={snapshot.playbackTimeSeconds}
